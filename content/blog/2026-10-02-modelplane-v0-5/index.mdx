@@ -119,31 +119,23 @@ spec:
   metrics:
   - from: my_engine_queued_requests
     to: modelplane_requests_waiting
-    acrossReplicas: Sum
   - from: my_engine_kv_transfer_ms
     to: modelplane_request_kv_transfer_seconds
     fromUnit: Milliseconds
-    acrossReplicas: Mean
 ```
 
-Two fields there are worth explaining, because both encode something a
-dashboard would otherwise have to guess.
+`fromUnit` is worth explaining, because it encodes something a dashboard would
+otherwise have to guess. A metric's name is no guide to its unit, so the mapping
+says what the source measures in and Modelplane converts to the base unit the
+target name claims, histogram buckets and all. Skipping it is the expensive
+mistake: a series named `_seconds` holding milliseconds reads a thousand times
+fast, and nothing downstream can tell.
 
-`fromUnit` exists because a metric's name is no guide to its unit. Modelplane
-converts to the base unit the target name claims, histogram buckets and all.
-Skipping it is the expensive mistake: a series named `_seconds` holding
-milliseconds reads a thousand times fast, and nothing downstream can tell.
-
-`acrossReplicas` exists because every replica publishes its own series, and a
-query over a deployment has to combine them. Whether that's a sum or an average
-is a property of the measurement rather than of the query, since summing two
-replicas at half their KV cache reads as one at full. The mapping records it so
-that a dashboard doesn't have to.
-
-Modelplane deliberately leaves the combining to your backend. A scrape of one
-replica is one batch. A collector that added them up would be summing readings
-taken at different moments, which is not the traffic that happened. Your backend
-already has every replica's series and can combine them at query time.
+One thing Modelplane deliberately doesn't do is combine a deployment's replicas
+for you. Each publishes its own series, and a scrape of one replica is one batch,
+so a collector that added them up would be summing readings taken at different
+moments. That isn't the traffic that happened. Your backend already has every
+replica's series and can combine them at query time.
 
 ## Civo
 
