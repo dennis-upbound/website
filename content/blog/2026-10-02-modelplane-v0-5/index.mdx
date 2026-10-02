@@ -20,7 +20,8 @@ fails over between the backends that serve it. Modelplane also collects your
 fleet's metrics under one set of names, whatever engine produced them. And
 Civo joins the clouds Modelplane can provision a cluster on.
 
-Here's what's new.
+A `ModelDeployment` can also scale to zero replicas now, so one you aren't
+serving from costs you no GPUs. Here's what's new.
 
 ## The fleet gateway is an AI gateway
 
@@ -157,12 +158,26 @@ with a `maxNodeCount` is scaled by the upstream cluster-autoscaler running on
 the cluster itself. Civo's volumes are ReadWriteOnce, so `ModelCache` isn't
 available there yet.
 
-## Also in v0.5
+## Scaling to zero
 
-A `ModelDeployment` can scale to zero replicas, which is most of the reason to
-put KEDA in front of an expensive GPU workload. An `InferenceCluster` won't
-delete while anything still composes onto it. Serving-stack pods no longer
-tolerate every taint, so a tainted node pool means what you intended.
+A `ModelDeployment` can now scale to zero replicas. `spec.replicas` used to carry
+a floor of one, so `kubectl scale --replicas=0` was rejected at admission — which
+is awkward, given that scaling to zero is most of the reason to put KEDA in front
+of a GPU workload in the first place. There was no way to park a deployment
+either: withdrawing its endpoints while keeping the object meant tainting the
+cluster hosting it.
+
+Dropping the floor on its own would have made a parked deployment look broken.
+Zero desired replicas against an empty schedule reads as none of them scheduled,
+and on a control plane with no clusters it reads as having nowhere to run, so a
+deployment you had deliberately parked would sit there permanently not ready.
+
+Zero now takes a path of its own. Nothing is composed, so the deployment's
+`ModelReplicas` and `ModelEndpoints` are pruned, `status.replicas` reports 0 to
+the scale subresource, and readiness reports true with a `ScaledToZero` reason —
+the way a Deployment at zero replicas still reports Available. A parked
+deployment reads as parked rather than as failing, which is what makes it safe
+for an autoscaler to do on your behalf.
 
 ## Try it
 
