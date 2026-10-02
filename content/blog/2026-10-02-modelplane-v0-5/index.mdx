@@ -1,0 +1,175 @@
+---
+title: "Modelplane v0.5: An AI gateway, fleet telemetry, and Civo"
+description: "Modelplane v0.5 turns the fleet gateway into an AI gateway, collects every engine's metrics under one vocabulary, and adds Civo as a cluster source."
+date: "2026-10-02"
+authors:
+  - name: "Dennis Ramdass"
+    title: "Principal AI Engineer, Upbound"
+    url: "https://github.com/dennis-upbound"
+    avatar: "/authors/dennis.jpg"
+    github: "https://github.com/dennis-upbound"
+    bio: "Dennis is a Principal AI engineer at Upbound and a core maintainer of Modelplane. He's spent the last two decades working on cloud and infrastructure, and more recently AI agents and infrastructure, and is now bringing that work to AI inference with Modelplane."
+tags: ["release", "inference", "control-plane", "observability"]
+draft: true
+pinned: true
+---
+
+Modelplane v0.5 is out. The gateway on your control plane is now an AI
+gateway: it authenticates callers, reads the model a request asks for, and
+fails over between the backends that serve it. Modelplane also collects your
+fleet's metrics under one set of names, whatever engine produced them. And
+Civo joins the clouds Modelplane can provision a cluster on.
+
+Here's what's new.
+
+## The fleet gateway is an AI gateway
+
+The gateway on the control plane used to be an HTTP router. It understood
+nothing about the requests it forwarded. A caller reached a `ModelService` by
+path prefix, nothing authenticated them, and the hop out to each cluster
+crossed the public internet in plain HTTP.
+
+It's now an [Envoy AI Gateway](https://aigateway.envoyproxy.io/), the same one
+every `InferenceCluster` already runs at its edge. It reads the model a request
+names in its body and resolves the `ModelService` that serves it. For the
+backend it picks, it rewrites the model name, the credential and the path, so a
+backend sees the name it knows and a caller's key never reaches a third party.
+
+`ModelService` gains `priority` alongside `weight`. Weight splits traffic
+between backends at one priority; priority fails over to the next when they go
+unhealthy. Every request meters a token count per caller, streams included.
+
+`InferenceGateway` also stops being a singleton. It names the cluster it runs
+on, so you can run one per region for residency, or two in a region for
+availability:
+
+```yaml
+apiVersion: modelplane.ai/v1alpha1
+kind: InferenceGateway
+metadata:
+  name: eu
+spec:
+  clusterName: gw-gcp-eu
+  tls:
+    certificateRefs:
+    - name: eu-example-com-tls
+  auth:
+    method: APIKey
+    apiKey:
+      secretSelector:
+        matchLabels:
+          modelplane.ai/inference-keys: "true"
+  serviceSelector:
+    matchLabels:
+      example.org/region: eu
+```
+
+The hop from a fleet gateway to a cluster gateway is now authenticated in both
+directions by a per-cluster PKI, which cert-manager issues and trust-manager
+distributes.
+
+## One vocabulary for a fleet's metrics
+
+Modelplane doesn't own your engine. You bring the image and the command, and
+that's the point: a `ModelDeployment` runs vLLM, SGLang, or anything else that
+speaks the OpenAI API, without Modelplane knowing anything about it.
+
+That same freedom is what makes a fleet hard to watch. vLLM publishes
+`vllm:num_requests_waiting`. SGLang calls the same measurement
+`sglang:num_queue_reqs`. DCGM reports framebuffer memory in mebibytes under a
+name that says bytes, and energy in millijoules under a name that says joules.
+A dashboard written against one engine is wrong on the next, and a fleet
+running both has no fleet-wide number at all. We couldn't fix that by picking
+an engine, so we fixed it at collection.
+
+Modelplane now runs an OpenTelemetry collector on every inference cluster. It
+discovers every component Modelplane installs, renames each one's series into a
+single `modelplane_*` vocabulary, and exports them wherever you say. Only
+`modelplane_*` leaves the cluster: a series nobody renamed is one whose meaning
+Modelplane can't vouch for across engines, and it costs the same to carry as
+one that was.
+
+Two new kinds. A `TelemetryDestination` says where metrics go, and nothing is
+collected until one exists:
+
+```yaml
+apiVersion: modelplane.ai/v1alpha1
+kind: TelemetryDestination
+metadata:
+  name: default
+spec:
+  sinks:
+  - name: prometheus
+    type: prometheus_remote_write
+    endpoint: https://prom.example.internal/api/v1/write
+```
+
+A `MetricMapping` says what a component emits and what Modelplane calls it.
+Modelplane ships mappings for vLLM, SGLang, the gateway, the endpoint picker
+and DCGM, so those need nothing from you. Write one for an engine Modelplane
+has never seen and its numbers join the same surface:
+
+```yaml
+apiVersion: modelplane.ai/v1alpha1
+kind: MetricMapping
+metadata:
+  name: my-engine
+spec:
+  metrics:
+  - from: my_engine_queued_requests
+    to: modelplane_requests_waiting
+    acrossReplicas: Sum
+  - from: my_engine_kv_transfer_ms
+    to: modelplane_request_kv_transfer_seconds
+    fromUnit: Milliseconds
+    acrossReplicas: Mean
+```
+
+Two fields there are worth explaining, because both encode something a
+dashboard would otherwise have to guess.
+
+`fromUnit` exists because a metric's name is no guide to its unit. Modelplane
+converts to the base unit the target name claims, histogram buckets and all.
+Skipping it is the expensive mistake: a series named `_seconds` holding
+milliseconds reads a thousand times fast, and nothing downstream can tell.
+
+`acrossReplicas` exists because every replica publishes its own series, and a
+query over a deployment has to combine them. Whether that's a sum or an average
+is a property of the measurement rather than of the query — summing two
+replicas at half their KV cache reads as one at full. The mapping says which,
+so the dashboard doesn't have to decide. Modelplane deliberately doesn't
+combine them in the collector: a scrape of one replica is one batch, and adding
+readings taken at different moments is not the traffic that happened. Your
+backend holds every replica's series and combines them at query time, where the
+arithmetic is right.
+
+## Civo
+
+[Civo](https://www.civo.com/) joins EKS, AKS, GKE, Nebius and Vultr as a cloud
+Modelplane can provision an `InferenceCluster` on, with the same spec you'd
+write for any of them.
+
+Two things about Civo needed handling underneath. Its GPU images carry no
+NVIDIA driver, so the serving stack installs the GPU Operator to supply one,
+with the toolkit and device plugin switched off so the DRA driver stays the
+only thing allocating GPUs. And Civo has no server-side autoscaler, so a pool
+with a `maxNodeCount` is scaled by the upstream cluster-autoscaler running on
+the cluster itself. Civo's volumes are ReadWriteOnce, so `ModelCache` isn't
+available there yet.
+
+## Also in v0.5
+
+A `ModelDeployment` can scale to zero replicas, which is most of the reason to
+put KEDA in front of an expensive GPU workload. An `InferenceCluster` won't
+delete while anything still composes onto it. Serving-stack pods no longer
+tolerate every taint, so a tainted node pool means what you intended.
+
+## Try it
+
+The [getting-started guide](https://docs.modelplane.ai/getting-started/) covers
+standing up a fleet, and
+[Monitor the Fleet](https://docs.modelplane.ai/platform/telemetry/) covers
+pointing telemetry at a backend you already run. Modelplane is Apache 2.0 and
+moving fast at
+[github.com/modelplaneai/modelplane](https://github.com/modelplaneai/modelplane),
+and questions are welcome in [Slack](https://slack.modelplane.ai).
