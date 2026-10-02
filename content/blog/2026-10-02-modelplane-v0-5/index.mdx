@@ -1,6 +1,6 @@
 ---
-title: "Modelplane v0.5: An AI gateway, fleet telemetry, and Civo"
-description: "Modelplane v0.5 turns the fleet gateway into an AI gateway, collects every engine's metrics under one vocabulary, and adds Civo as a cluster source."
+title: "Modelplane v0.5: an AI gateway and fleet telemetry"
+description: "Modelplane v0.5 turns the fleet gateway into an AI gateway and collects every engine's metrics under one vocabulary. Civo joins the clouds it can provision on."
 date: "2026-10-02"
 authors:
   - name: "Dennis Ramdass"
@@ -106,8 +106,8 @@ spec:
 ```
 
 A `MetricMapping` says what a component emits and what Modelplane calls it.
-Modelplane ships mappings for vLLM, SGLang, the gateway, the endpoint picker
-and DCGM, so those need nothing from you. Write one for an engine Modelplane
+Modelplane comes with mappings for vLLM, SGLang, the gateway, the endpoint
+picker and DCGM, so those need nothing from you. Write one for an engine Modelplane
 has never seen and its numbers join the same surface:
 
 ```yaml
@@ -136,13 +136,14 @@ milliseconds reads a thousand times fast, and nothing downstream can tell.
 
 `acrossReplicas` exists because every replica publishes its own series, and a
 query over a deployment has to combine them. Whether that's a sum or an average
-is a property of the measurement rather than of the query — summing two
-replicas at half their KV cache reads as one at full. The mapping says which,
-so the dashboard doesn't have to decide. Modelplane deliberately doesn't
-combine them in the collector: a scrape of one replica is one batch, and adding
-readings taken at different moments is not the traffic that happened. Your
-backend holds every replica's series and combines them at query time, where the
-arithmetic is right.
+is a property of the measurement rather than of the query, since summing two
+replicas at half their KV cache reads as one at full. The mapping records it so
+that a dashboard doesn't have to.
+
+Modelplane deliberately leaves the combining to your backend. A scrape of one
+replica is one batch. A collector that added them up would be summing readings
+taken at different moments, which is not the traffic that happened. Your backend
+already has every replica's series and can combine them at query time.
 
 ## Civo
 
@@ -161,9 +162,9 @@ available there yet.
 ## Scaling to zero
 
 A `ModelDeployment` can now scale to zero replicas. `spec.replicas` used to carry
-a floor of one, so `kubectl scale --replicas=0` was rejected at admission — which
-is awkward, given that scaling to zero is most of the reason to put KEDA in front
-of a GPU workload in the first place. There was no way to park a deployment
+a floor of one, so `kubectl scale --replicas=0` was rejected at admission. That
+is awkward when scaling to zero is most of the reason to put KEDA in front of a
+GPU workload in the first place. There was no way to park a deployment
 either: withdrawing its endpoints while keeping the object meant tainting the
 cluster hosting it.
 
@@ -174,7 +175,7 @@ deployment you had deliberately parked would sit there permanently not ready.
 
 Zero now takes a path of its own. Nothing is composed, so the deployment's
 `ModelReplicas` and `ModelEndpoints` are pruned, `status.replicas` reports 0 to
-the scale subresource, and readiness reports true with a `ScaledToZero` reason —
+the scale subresource, and readiness reports true with a `ScaledToZero` reason,
 the way a Deployment at zero replicas still reports Available. A parked
 deployment reads as parked rather than as failing, which is what makes it safe
 for an autoscaler to do on your behalf.
