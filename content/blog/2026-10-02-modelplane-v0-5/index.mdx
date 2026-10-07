@@ -14,9 +14,9 @@ draft: true
 pinned: true
 ---
 
-Modelplane v0.5 is out. The gateway on your control plane is now an AI
-gateway: it authenticates callers, reads the model a request asks for, and
-fails over between the backends that serve it. Modelplane also collects your
+Modelplane v0.5 is out. The fleet gateway is now an AI gateway. It
+authenticates callers and reads the model a request asks for, then fails over
+between the backends that serve it. Modelplane also collects your
 fleet's metrics under one set of names, whatever engine produced them. And
 Civo joins the clouds Modelplane can provision a cluster on.
 
@@ -25,13 +25,16 @@ serving from costs you no GPUs. Here's what's new.
 
 ## The fleet gateway is an AI gateway
 
-The gateway on the control plane used to be an HTTP router. It understood
+The fleet gateway used to be an HTTP router on the control plane. It understood
 nothing about the requests it forwarded. A caller reached a `ModelService` by
 path prefix, nothing authenticated them, and the hop out to each cluster
 crossed the public internet in plain HTTP.
 
-It's now an [Envoy AI Gateway](https://aigateway.envoyproxy.io/), the same one
-every `InferenceCluster` already runs at its edge. It reads the model a request
+It's now [Agent Router](https://theagentrouter.ai/), running on an
+`InferenceCluster` you name rather than on the control plane, and the same one
+every cluster already runs at its edge. We run a build from before the
+project left the Envoy family and took that name, so you'll still see
+`envoy-ai-gateway-system` on a cluster. It reads the model a request
 names in its body and resolves the `ModelService` that serves it. For the
 backend it picks, it rewrites the model name, the credential and the path, so a
 backend sees the name it knows and a caller's key never reaches a third party.
@@ -40,9 +43,9 @@ backend sees the name it knows and a caller's key never reaches a third party.
 between backends at one priority; priority fails over to the next when they go
 unhealthy. Every request meters a token count per caller, streams included.
 
-`InferenceGateway` also stops being a singleton. It names the cluster it runs
-on, so you can run one per region for residency, or two in a region for
-availability:
+You can now run more than one `InferenceGateway`. Each names the cluster it
+runs on, so a fleet can have one per region for residency, or two in a region
+for availability:
 
 ```yaml
 apiVersion: modelplane.ai/v1alpha1
@@ -65,30 +68,29 @@ spec:
       example.org/region: eu
 ```
 
-The hop from a fleet gateway to a cluster gateway is now authenticated in both
-directions by a per-cluster PKI, which cert-manager issues and trust-manager
-distributes.
+Traffic from a fleet gateway to a cluster gateway is now mutually
+authenticated and encrypted. It used to cross the public internet as plain
+HTTP.
 
 ## One vocabulary for a fleet's metrics
 
-Modelplane doesn't own your engine. You bring the image and the command, and
-that's the point: a `ModelDeployment` runs vLLM, SGLang, or anything else that
-speaks the OpenAI API, without Modelplane knowing anything about it.
+Modelplane doesn't own your engine. You bring the image and the command, and a
+`ModelDeployment` runs vLLM, SGLang, or anything else that speaks the OpenAI
+API, without Modelplane knowing anything about it.
 
-That same freedom is what makes a fleet hard to watch. vLLM publishes
+That freedom is what makes a fleet hard to watch. vLLM publishes
 `vllm:num_requests_waiting`. SGLang calls the same measurement
-`sglang:num_queue_reqs`. DCGM reports framebuffer memory in mebibytes under a
-name that says bytes, and energy in millijoules under a name that says joules.
+`sglang:num_queue_reqs`. [DCGM](https://developer.nvidia.com/dcgm), NVIDIA's
+GPU exporter, reports framebuffer memory in mebibytes under a name that says
+bytes, and energy in millijoules under a name that says joules.
 A dashboard written against one engine is wrong on the next, and a fleet
-running both has no fleet-wide number at all. We couldn't fix that by picking
-an engine, so we fixed it at collection.
+running both has no fleet-wide number at all. Standardising on one engine would
+cost you the choice that made Modelplane worth using, so Modelplane normalises
+the names where it collects them instead.
 
 Modelplane now runs an OpenTelemetry collector on every inference cluster. It
 discovers every component Modelplane installs, renames each one's series into a
-single `modelplane_*` vocabulary, and exports them wherever you say. Only
-`modelplane_*` leaves the cluster: a series nobody renamed is one whose meaning
-Modelplane can't vouch for across engines, and it costs the same to carry as
-one that was.
+single `modelplane_*` vocabulary, and exports them wherever you say.
 
 Two new kinds. A `TelemetryDestination` says where metrics go, and nothing is
 collected until one exists:
@@ -124,18 +126,10 @@ spec:
     fromUnit: Milliseconds
 ```
 
-`fromUnit` is worth explaining, because it encodes something a dashboard would
-otherwise have to guess. A metric's name is no guide to its unit, so the mapping
-says what the source measures in and Modelplane converts to the base unit the
-target name claims, histogram buckets and all. Skipping it is the expensive
-mistake: a series named `_seconds` holding milliseconds reads a thousand times
-fast, and nothing downstream can tell.
-
-One thing Modelplane deliberately doesn't do is combine a deployment's replicas
-for you. Each publishes its own series, and a scrape of one replica is one batch,
-so a collector that added them up would be summing readings taken at different
-moments. That isn't the traffic that happened. Your backend already has every
-replica's series and can combine them at query time.
+`fromUnit` is the one to get right. A metric's name is no guide to its unit, so
+the mapping says what the source measures in and Modelplane converts, histogram
+buckets and all. Skip it and a series named `_seconds` holding milliseconds
+reads a thousand times fast, with nothing downstream to catch it.
 
 ## Civo
 
